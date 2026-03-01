@@ -38,8 +38,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 String server_route = "https://rfid.pythonanywhere.com/upload";
 
-const char* CSV_PATH  = "/uids.csv";
-const char* JSON_PATH = "/data.json";
+const char* USERS_DB = "/users.csv";
 
 unsigned long lastSync = 0;
 bool wifiConnected = false;
@@ -48,7 +47,6 @@ bool wifiConnected = false;
 const char* AP_SSID = "ESP32-RFID";
 const char* AP_PASS = "12345678";
 
-StaticJsonDocument<4096> main_users;
 String lastScannedUID = "";
 String pendingUID = "";
 bool SaveMode = false;
@@ -68,11 +66,29 @@ void showMessage(String l1, String l2 = "", String l3 = "") {
 
 
 void startAP() {
+  String currentApPass = AP_PASS;
+
+  
+  if (LittleFS.exists("/ap_config.json")) {
+    File f = LittleFS.open("/ap_config.json", FILE_READ);
+    if (f) {
+      StaticJsonDocument<256> doc;
+      if (!deserializeJson(doc, f)) {
+        currentApPass = doc["ap_pass"].as<String>();
+      }
+      f.close();
+    }
+  }
+
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASS);
+  
+  if (currentApPass.length() < 8) currentApPass = AP_PASS; 
+
+  WiFi.softAP(AP_SSID, currentApPass.c_str());
   Serial.print("AP IP: ");
   Serial.println(WiFi.softAPIP());
 }
+
 
 void connectToWiFiIfConfigured() {
   showMessage("UPLOADING FILES...");
@@ -118,7 +134,7 @@ void connectToWiFiIfConfigured() {
 }
 
 void handleWifiPage() {
-    String html = R"rawliteral(
+    const char html[] PROGMEM = R"rawliteral(
   <!DOCTYPE html>
   <html>
   <head>
@@ -154,7 +170,7 @@ void handleWifiPage() {
   </body>
   </html>
   )rawliteral";
-    server.send(200, "text/html", html);
+    server.send_P(200, "text/html", html);
 }
 
 void handleSaveWifi() {
@@ -215,7 +231,7 @@ bool uploadCSV(const String& path) {
 
 
   WiFiClientSecure client;
-  client.setInsecure(); // <--- KEY LINE: Tells ESP32 to ignore SSL certificate checks
+  client.setInsecure(); 
 
   HTTPClient http;
 
@@ -315,15 +331,14 @@ void syncAllCSVs() {
   File root = LittleFS.open("/");
   File file = root.openNextFile();
   
-  bool anyError = false;   // Track if any upload fails
-  bool didWork = false;    // Track if we actually tried to upload something
+  bool anyError = false;  
+  bool didWork = false;  
 
   while (file) {
     String rawName = String(file.name());
     String filePath;
     String cleanName;
 
-    // FIX: Standardize path to ensure it starts with "/"
     if (rawName.startsWith("/")) {
       filePath = rawName;
       cleanName = rawName.substring(1);
@@ -332,21 +347,22 @@ void syncAllCSVs() {
       cleanName = rawName;
     }
 
-    // Only process CSV files that are NOT logs or system files
-    if (!file.isDirectory() && filePath.endsWith(".csv") && !filePath.equals("/uids.csv")) {
+    if (!file.isDirectory() && filePath.endsWith(".csv") && !filePath.equals(USERS_DB)) {
       
-      // Check if this file has been uploaded yet
       if (!isUploaded(cleanName)) {
-        didWork = true; // We found work to do
+        didWork = true; 
         Serial.print("[SYNC] Found pending file: ");
+        showMessage("[SYNC] Found pending file: ");
         Serial.println(filePath);
 
         if (uploadCSV(filePath)) {
           markUploaded(cleanName);
           Serial.println("[SYNC]  Upload success");
+          showMessage("[SYNC]  Upload success");
         } else {
           Serial.println("[SYNC]  Upload failed");
-          anyError = true; // Mark that we had an error
+          showMessage("[SYNC]  Upload failed");
+          anyError = true; 
         }
       }
     }
@@ -355,11 +371,11 @@ void syncAllCSVs() {
 
   if (!anyError) {
     Serial.println("[SYNC] All files synced successfully.");
-    showMessage("[SYNC] Successfully synced All files. Entering AP mode...");
+    showMessage("[SYNC] Successfully synced All files.");
     delay(3000);
   } else {
     Serial.println("[SYNC] Some files failed to upload. Retrying next loop.");
-    showMessage("[SYNC] Failed to upload some files. Entering AP mode...");
+    showMessage("[SYNC] Failed to upload some files.");
     delay(3000);
   }
 
@@ -391,52 +407,29 @@ String uidToString(MFRC522::Uid *uid) {
   return s;
 }
 
-void loadJson() {
-  if (!LittleFS.exists(JSON_PATH)) return;
 
-  File file = LittleFS.open(JSON_PATH, "r");
-  deserializeJson(main_users, file);
-  file.close();
-}
 
 void addUser(String uid, String name, String mID) {
-  StaticJsonDocument<1024> doc;
-
-  if (LittleFS.exists(JSON_PATH)) {
-    File f = LittleFS.open(JSON_PATH, "r");
-    deserializeJson(doc, f);
-    f.close();
+  File file = LittleFS.open(USERS_DB, FILE_APPEND);
+  if (!file) {
+    Serial.println("FAILED TO OPEN DB FOR SAVING");
+    return;
   }
 
-  JsonObject user = doc[uid].to<JsonObject>();
-  user["name"] = name;
-  user["mID"]  = mID;
-
-  File f = LittleFS.open(JSON_PATH, "w");
-  serializeJson(doc, f);
-  f.close();
-
-  loadJson();
-}
-
-void saveUID(const String &uid) {
-  File file = LittleFS.open(CSV_PATH, FILE_APPEND);
-  if (!file) return;
-  file.print(main_users[uid]["mID"].as<const char*>());
+  file.print(uid);
   file.print(",");
-  file.print(main_users[uid]["name"].as<const char*>());
+  file.print(name);
   file.print(",");
-  file.print(getDate());
-  file.print(",");
-  file.println(getTime());
+  file.println(mID);
   file.close();
 }
+
 
 String getSafeDateForFilename() {
   return String(now.year()) + "-" + twoDigit(now.month()) + "-" + twoDigit(now.day()) + "_Attendance.csv";
 }
 
-void MarkAttendance(const String &uid) {
+void MarkAttendance(const String &uid, String& name, String& mID) {
 
   String path = "/" + getSafeDateForFilename();
   markPending(getSafeDateForFilename());
@@ -451,9 +444,9 @@ void MarkAttendance(const String &uid) {
   File file = LittleFS.open(path, FILE_APPEND);
   if (!file) return;
 
-  file.print(main_users[uid]["mID"].as<const char*>());
+  file.print(mID);
   file.print(",");
-  file.print(main_users[uid]["name"].as<const char*>());
+  file.print(name);
   file.print(",");
   file.print(getDate());
   file.print(",");
@@ -463,81 +456,198 @@ void MarkAttendance(const String &uid) {
 }
 
 void deleteUser(const String& uid) {
-  StaticJsonDocument<1024> doc;
+  if (!LittleFS.exists(USERS_DB)) return;
 
-  if (!LittleFS.exists(JSON_PATH)) return;
+  File original = LittleFS.open(USERS_DB, FILE_READ);
+  File temp = LittleFS.open("/temp_file.csv", FILE_WRITE);
 
-  File f = LittleFS.open(JSON_PATH, "r");
-  DeserializationError err = deserializeJson(doc, f);
-  f.close();
-  if (err) return;
+  if (!original || !temp) return;
 
-  doc.remove(uid);
+  while (original.available()){
+    String line = original.readStringUntil('\n');
+    line.trim();
 
-  f = LittleFS.open(JSON_PATH, "w");
-  serializeJson(doc, f);
-  f.close();
+    if (line.length() == 0) continue;
 
-  loadJson(); // refresh RAM copy
+    if (!line.startsWith(uid + ",")){
+      temp.println(line);
+    }
+  }
+
+  original.close();
+  temp.close();
+  LittleFS.remove(USERS_DB);
+  LittleFS.rename("/temp_file.csv", USERS_DB);
 }
 
+const char delete_page_header[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delete Users</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:16px}
+  .card{max-width:720px;margin:auto;background:#020617;border-radius:12px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+  h2{margin:0 0 12px 0;color:#93c5fd}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;padding:10px;border:1px solid #1f2933;border-radius:8px;margin:8px 0;background:#020617}
+  .meta{font-size:13px;opacity:.85}
+  form{margin:0}
+  button{padding:8px 12px;border-radius:6px;border:1px solid #7f1d1d;background:#7f1d1d;color:#fff}
+  button:hover{filter:brightness(1.1)}
+  a{color:#93c5fd;text-decoration:none;display:inline-block;margin-top:10px}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h2>Delete Users</h2>
+)rawliteral";
+
+const char delete_page_footer[] PROGMEM = R"rawliteral(
+    <a href="/">Back</a>
+  </div>
+</body>
+</html>
+)rawliteral";
+
 void handleDeleteUserPage() {
+ 
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html", ""); 
+
+  server.sendContent_P(delete_page_header);
+
+  File file = LittleFS.open(USERS_DB, FILE_READ);
+  if (!file) {
+    server.sendContent("<p>No users found (Database missing).</p>");
+  } else {
+    bool usersFound = false;
+    
+    while (file.available()) {
+      String line = file.readStringUntil('\n');
+      line.trim();
+
+      if (line.length() == 0 || line == "UID,Name,MemberID") continue;
+
+      int comma1 = line.indexOf(',');
+      int comma2 = line.indexOf(',', comma1 + 1);
+
+      if (comma1 > 0 && comma2 > 0) {
+        usersFound = true;
+        String uid = line.substring(0, comma1);
+        String name = line.substring(comma1 + 1, comma2);
+        String mID = line.substring(comma2 + 1);
+
+        String rowHtml = "<div class='row'><div class='meta'><b>" + uid + "</b><br>";
+        rowHtml += name + " | " + mID + "</div>";
+        rowHtml += "<form action='/confirmDelete' method='POST'>";
+        rowHtml += "<input type='hidden' name='uid' value='" + uid + "'>";
+        rowHtml += "<button type='submit'>Delete</button></form></div>";
+
+        server.sendContent(rowHtml);
+      }
+    }
+    file.close();
+
+    if (!usersFound) {
+      server.sendContent("<p class='empty'>No users found.</p>");
+    }
+  }
+
+  server.sendContent_P(delete_page_footer);
+ 
+  server.sendContent(""); 
+}
+
+void handleApConfigPage() {
+  const char html[] PROGMEM = R"rawliteral(
+  <!DOCTYPE html>
+  <html>
+  <head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AP Settings</title>
+  <style>
+    body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:16px}
+    .card{max-width:520px;margin:auto;background:#020617;border-radius:12px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    h2{margin:0 0 8px 0;color:#93c5fd}
+    p{opacity:.8;font-size:14px;margin-bottom:16px}
+    label{display:block;margin:12px 0 6px;font-size:14px;}
+    input{width:100%;padding:12px;border-radius:8px;border:1px solid #1f2933;background:#020617;color:#e5e7eb;box-sizing:border-box;}
+    input:focus{outline:none;border-color:#3b82f6;}
+    button{margin-top:20px;width:100%;padding:12px;border-radius:8px;border:none;background:#2563eb;color:#fff;font-weight:600;cursor:pointer}
+    button:hover{filter:brightness(1.05)}
+    .warning{color:#f87171;font-size:12px;margin-top:8px;}
+    a{color:#93c5fd;text-decoration:none;display:inline-block;margin-top:15px}
+  </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>Change AP Password</h2>
+      <p>Change the password needed to connect directly to the ESP32's WiFi network.</p>
+      <form action="/saveApConfig" method="POST">
+        <label>New Password</label>
+        <input type="password" name="ap_pass" placeholder="Minimum 8 characters" minlength="8" required>
+        <div class="warning">Note: Changing this will disconnect you. You will need to reconnect with the new password.</div>
+        <button type="submit">Save & Restart AP</button>
+      </form>
+      <a href="/">Back to Dashboard</a>
+    </div>
+  </body>
+  </html>
+  )rawliteral";
+
+  server.send_P(200, "text/html", html);
+}
+
+void handleSaveApConfig() {
+  if (!server.hasArg("ap_pass")) {
+    server.send(400, "text/plain", "Missing Password");
+    return;
+  }
+
+  String newPass = server.arg("ap_pass");
+
+  if (newPass.length() < 8) {
+    server.send(400, "text/plain", "Password must be at least 8 characters!");
+    return;
+  }
+
+
+  StaticJsonDocument<256> doc;
+  doc["ap_pass"] = newPass;
+
+  File f = LittleFS.open("/ap_config.json", FILE_WRITE);
+  if (f) {
+    serializeJson(doc, f);
+    f.close();
+  }
+
   String html = R"rawliteral(
   <!DOCTYPE html>
   <html>
   <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Delete Users</title>
+  <title>Password Saved</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:16px}
-    .card{max-width:720px;margin:auto;background:#020617;border-radius:12px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
-    h2{margin:0 0 12px 0;color:#93c5fd}
-    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;padding:10px;border:1px solid #1f2933;border-radius:8px;margin:8px 0;background:#020617}
-    .meta{font-size:13px;opacity:.85}
-    form{margin:0}
-    button{padding:8px 12px;border-radius:6px;border:1px solid #7f1d1d;background:#7f1d1d;color:#fff}
-    button:hover{filter:brightness(1.1)}
-    a{color:#93c5fd;text-decoration:none;display:inline-block;margin-top:10px}
-    .empty{opacity:.7}
+    body{font-family:system-ui,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:16px;text-align:center;}
+    .card{max-width:520px;margin:auto;background:#020617;border-radius:12px;padding:20px;border:1px solid #22c55e;}
+    h2{color:#22c55e;margin-top:0;}
   </style>
   </head>
   <body>
     <div class="card">
-      <h2>Delete Users</h2>
-  )rawliteral";
-
-  if (main_users.size() == 0) {
-    html += "<p class='empty'>No users found.</p><a href='/'>Back</a></div></body></html>";
-    server.send(200, "text/html", html);
-    return;
-  }
-
-  for (JsonPair kv : main_users.as<JsonObject>()) {
-    String uid = kv.key().c_str();
-    const char* name = kv.value()["name"] | "N/A";
-    const char* mID  = kv.value()["mID"]  | "N/A";
-
-    html += "<div class='row'><div class='meta'><b>" + uid + "</b><br>";
-    html += String(name) + " | " + String(mID) + "</div>";
-
-    html += R"rawliteral(
-      <form action="/confirmDelete" method="POST">
-        <input type="hidden" name="uid" value=")rawliteral" + uid + R"rawliteral(">
-        <button type="submit">Delete</button>
-      </form>
-    )rawliteral";
-
-    html += "</div>";
-  }
-
-  html += R"rawliteral(
-    <a href="/">Back</a>
-  </div>
+      <h2>Password Saved!</h2>
+      <p>The ESP32 is restarting. Please reconnect to the WiFi network using your new password.</p>
+    </div>
   </body>
   </html>
   )rawliteral";
 
   server.send(200, "text/html", html);
+  
+  
+  delay(1000);
+  ESP.restart();
 }
 
 void handleConfirmDelete() {
@@ -548,11 +658,6 @@ void handleConfirmDelete() {
 
   String uid = server.arg("uid");
 
-  if (!main_users.containsKey(uid)) {
-    server.send(404, "text/plain", "User not found");
-    return;
-  }
-
   deleteUser(uid);
 
   String html = R"rawliteral(
@@ -562,19 +667,18 @@ void handleConfirmDelete() {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>User Deleted</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:16px}
+    body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:16px}
     .card{max-width:520px;margin:auto;background:#020617;border-radius:12px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);text-align:center}
     h2{margin:0 0 8px 0;color:#f87171}
     p{opacity:.85;margin-bottom:16px}
     a{display:inline-block;text-decoration:none;color:#e5e7eb;background:#111827;padding:10px 14px;border-radius:8px;margin:6px;border:1px solid #1f2933}
     a.primary{background:#2563eb;border-color:#2563eb}
-    a:hover{filter:brightness(1.05)}
   </style>
   </head>
   <body>
     <div class="card">
       <h2>User Deleted</h2>
-      <p>The selected user has been removed from the system.</p>
+      <p>The selected user has been removed.</p>
       <a class="primary" href="/deleteUser">Back to list</a>
       <a href="/">Home</a>
     </div>
@@ -585,10 +689,9 @@ void handleConfirmDelete() {
   server.send(200, "text/html", html);
 }
 
-
 void handleRoot() {
   SaveMode = false;
-  String html = R"rawliteral(
+  const char html[] PROGMEM = R"rawliteral(
   <!DOCTYPE html>
   <html>
   <head>
@@ -608,23 +711,24 @@ void handleRoot() {
       <h2>ESP32 RFID</h2>
       <a href="/download">Download CSV</a>
       <a href="/wifi">Configure WiFi</a>
-      <a href="/json">View JSON</a>
       <a href="/addUser">Add User</a>
       <a href="/deleteUser">Delete User</a>
+      <a href="/rtc">Set Date & Time</a>
+      <a href="/apConfig">Change AP Password</a>
       <div class="muted">AP mode dashboard</div>
     </div>
   </body>
   </html>
   )rawliteral";
 
-  server.send(200, "text/html", html);
+  server.send_P(200, "text/html", html);
 }
 
 void handleAddUser() {
   SaveMode = true;
   pendingUID = "";
 
-  String html = R"rawliteral(
+  const char html[] PROGMEM = R"rawliteral(
   <!DOCTYPE html>
   <html>
   <head>
@@ -661,7 +765,7 @@ void handleAddUser() {
   </html>
   )rawliteral";
 
-  server.send(200, "text/html", html);
+  server.send_P(200, "text/html", html);
 }
 
 
@@ -707,8 +811,8 @@ void handleSaveUser() {
     sendPage("No Card Scanned", "Scan the RFID card before submitting the form.", false);
     return;
   }
-
-  if (main_users.containsKey(pendingUID)) {
+  String name, mID;
+  if (findUsers(pendingUID, name, mID)) {
     sendPage("Duplicate UID", "This card is already registered.", false);
     return;
   }
@@ -720,49 +824,135 @@ void handleSaveUser() {
   sendPage("User Added", "The user was added successfully.", true);
 }
 
-void handleJson() {
-  File file = LittleFS.open(JSON_PATH, FILE_READ);
-  if (!file) {
-    server.send(404, "text/plain", "JSON not found");
-    return;
-  }
-  server.streamFile(file, "application/json");
-  file.close();
+const char download_page_header[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download CSV</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:16px}
+  .card{max-width:720px;margin:auto;background:#020617;border-radius:12px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+  h2{color:#93c5fd;margin-bottom:12px}
+  .row{display:flex;justify-content:space-between;align-items:center;padding:10px;border:1px solid #1f2933;border-radius:8px;margin:8px 0}
+  .left{display:flex;flex-direction:column}
+  .name{font-weight:600}
+  .status{font-size:12px;color:#94a3b8}
+  a.btn{background:#2563eb;color:#fff;padding:6px 10px;border-radius:6px;text-decoration:none;margin-left:6px}
+  a.del{background:#7f1d1d}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>Attendance CSV Files</h2>
+)rawliteral";
+
+void handleRTCPage() {
+  const char html[] PROGMEM = R"rawliteral(
+  <!DOCTYPE html>
+  <html>
+  <head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set Date & Time</title>
+  <style>
+    body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:16px}
+    .card{max-width:520px;margin:auto;background:#020617;border-radius:12px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    h2{margin:0 0 8px 0;color:#93c5fd}
+    p{opacity:.8}
+    label{display:block;margin:12px 0 6px}
+    input{width:100%;padding:12px;border-radius:8px;border:1px solid #1f2933;background:#020617;color:#e5e7eb;box-sizing:border-box;}
+    input[type="date"]::-webkit-calendar-picker-indicator, input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(1); }
+    button{margin-top:20px;width:100%;padding:12px;border-radius:8px;border:none;background:#2563eb;color:#fff;font-weight:600;cursor:pointer}
+    button:hover{filter:brightness(1.05)}
+    a{color:#93c5fd;text-decoration:none;display:inline-block;margin-top:15px}
+  </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>Set Date & Time</h2>
+      <p>Adjust the internal RTC module clock.</p>
+      <form action="/saveRTC" method="POST">
+        <label>Date</label>
+        <input type="date" name="date" required>
+        <label>Time</label>
+        <input type="time" name="time" required>
+        <button type="submit">Update RTC</button>
+      </form>
+      <a href="/">Back to Dashboard</a>
+    </div>
+  </body>
+  </html>
+  )rawliteral";
+
+  server.send_P(200, "text/html", html);
 }
 
+void handleSaveRTC() {
+  if (!server.hasArg("date") || !server.hasArg("time")) {
+    server.send(400, "text/plain", "Missing Date or Time");
+    return;
+  }
 
-void handleDownload() {
+  String dateStr = server.arg("date");
+  String timeStr = server.arg("time"); 
+
+
+  int year = dateStr.substring(0, 4).toInt();
+  int month = dateStr.substring(5, 7).toInt();
+  int day = dateStr.substring(8, 10).toInt();
+
+
+  int hour = timeStr.substring(0, 2).toInt();
+  int minute = timeStr.substring(3, 5).toInt();
+
+
+  rtc.adjust(DateTime(year, month, day, hour, minute, 0));
+  
+  now = rtc.now();
+
+
   String html = R"rawliteral(
   <!DOCTYPE html>
   <html>
   <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Download CSV</title>
+  <title>RTC Updated</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:16px}
-    .card{max-width:720px;margin:auto;background:#020617;border-radius:12px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
-    h2{color:#93c5fd;margin-bottom:12px}
-    .row{display:flex;justify-content:space-between;align-items:center;padding:10px;border:1px solid #1f2933;border-radius:8px;margin:8px 0}
-    .left{display:flex;flex-direction:column}
-    .name{font-weight:600}
-    .status{font-size:12px;color:#94a3b8}
-    a.btn{background:#2563eb;color:#fff;padding:6px 10px;border-radius:6px;text-decoration:none;margin-left:6px}
-    a.del{background:#7f1d1d}
+    body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:16px;text-align:center;}
+    .card{max-width:520px;margin:auto;background:#020617;border-radius:12px;padding:20px;border:1px solid #22c55e;}
+    h2{color:#22c55e;margin-top:0;}
+    a{display:inline-block;padding:10px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:8px;margin-top:15px;}
   </style>
   </head>
   <body>
-  <div class="card">
-  <h2>Attendance CSV Files</h2>
+    <div class="card">
+      <h2>Time Updated Successfully!</h2>
+      <p>The hardware clock has been synchronized.</p>
+      <a href="/">Back to Dashboard</a>
+    </div>
+  </body>
+  </html>
   )rawliteral";
+
+  server.send(200, "text/html", html);
+  
+  showMessage("RTC Updated!", getDate(), getTime());
+  delay(2000); 
+  showMessage("READY! Scan Card", "AP IP: " + WiFi.softAPIP().toString());
+}
+
+void handleDownload() {
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html", "");
+  
+  server.sendContent_P(download_page_header);
 
   File root = LittleFS.open("/");
   File file = root.openNextFile();
-
   bool found = false;
 
   while (file) {
     String rawName = String(file.name());
-    
     String path; 
     String cleanName;
 
@@ -775,39 +965,28 @@ void handleDownload() {
     }
     
     if (!file.isDirectory() && path.indexOf("Attendance") >= 0 && path.endsWith(".csv")) {
-      
       bool uploaded = isUploaded(cleanName);
       String status = uploaded ? "Uploaded" : "Pending";
       found = true;
 
-      html += "<div class='row'>";
-      html +=   "<div class='left'>";
-      html +=     "<div class='name'>" + cleanName + "</div>";
-      html +=     "<div class='status'>" + status + "</div>";
-      html +=   "</div>";
-      html +=   "<div>";
-      html +=     "<a class='btn' href='/get?file=" + cleanName + "'>Download</a>";
-      html +=     "<a class='btn del' href='/deleteCsv?file=" + cleanName + "'>Delete</a>";
-      html +=   "</div>";
-      html += "</div>";
+      String rowHtml = "<div class='row'><div class='left'><div class='name'>" + cleanName + "</div>";
+      rowHtml += "<div class='status'>" + status + "</div></div><div>";
+      rowHtml += "<a class='btn' href='/get?file=" + cleanName + "'>Download</a>";
+      rowHtml += "<a class='btn del' href='/deleteCsv?file=" + cleanName + "'>Delete</a>";
+      rowHtml += "</div></div>";
+      
+      server.sendContent(rowHtml); // Stream immediately
     }
     file = root.openNextFile();
   }
 
   if (!found) {
-    html += "<p>No attendance files found.</p>";
+    server.sendContent("<p>No attendance files found.</p>");
   }
 
-  html += R"rawliteral(
-  <a href="/">Back</a>
-  </div>
-  </body>
-  </html>
-  )rawliteral";
-
-  server.send(200, "text/html", html);
+  server.sendContent("<a href='/'>Back</a></div></body></html>");
+  server.sendContent(""); 
 }
-
 
 void handleGetCSV() {
   if (!server.hasArg("file")) {
@@ -845,14 +1024,42 @@ void handleDeleteCSV() {
   server.send(303);
 }
 
+bool findUsers(const String& targetUid, String& outName, String& outMID){
+  if (!LittleFS.exists(USERS_DB)) return false;
+  File file = LittleFS.open(USERS_DB, FILE_READ);
+  if (!file) return false;
+
+  bool found = false;
+  while (file.available()){
+    String line = file.readStringUntil('\n');
+    line.trim();
+
+    if (line.length() == 0) continue;
+
+    int first = line.indexOf(',');
+    int second = line.indexOf(',', first + 1);
+
+    if (first > 0 && second > 0){
+      String uid = line.substring(0, first);
+      if (uid == targetUid){
+        found = true;
+        outName = line.substring(first+1, second);
+        outMID = line.substring(second+1);
+        break;
+      }
+    }
+  }
+  file.close();
+  return found;
+}
+
 void verifyUID(String uid) {
-  if (main_users.containsKey(uid)) {
-    const char* name = main_users[uid]["name"];
-    const char* mID  = main_users[uid]["mID"];
+  String name, mID;
+  if (findUsers(uid, name, mID)) {
     showMessage("Welcome", name, mID);
     digitalWrite(GREEN_LED_PIN, HIGH);
     tone(BUZZER_PIN, 2000, 120);
-    MarkAttendance(uid);
+    MarkAttendance(uid, name, mID);
     delay(300);
     digitalWrite(GREEN_LED_PIN, LOW);
   } else {
@@ -880,31 +1087,29 @@ void setup() {
 
   if (!rtc.begin()){
     Serial.println("Could not connect with RTC.");
+    showMessage("Could not connect with RTC");
     while (1);
   }
 
   if (rtc.lostPower()){
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    showMessage("RTC reset. Set Date and Time in AP mode.");
+    delay(2000);
   }
+  //rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
 
   if (!LittleFS.begin(false)) {
     Serial.println("LittleFS failed");
+    showMessage("LittleFS failed");
     while (1);
   }
 
-  if (!LittleFS.exists(CSV_PATH)) {
-    File f = LittleFS.open(CSV_PATH, FILE_WRITE);
-    f.println("UID");
+  if (!LittleFS.exists(USERS_DB)) {
+    Serial.println("Creating new User Database...");
+    File f = LittleFS.open(USERS_DB, FILE_WRITE);
+    f.println("UID,Name,MemberID"); 
     f.close();
   }
-
-  if (!LittleFS.exists(JSON_PATH)) {
-    File f = LittleFS.open(JSON_PATH, FILE_WRITE);
-    f.print("{}");
-    f.close();
-  }
-
-  loadJson();
 
   connectToWiFiIfConfigured();
   //startAP();
@@ -914,7 +1119,6 @@ void setup() {
 
   server.on("/", handleRoot);
   server.on("/download", handleDownload);
-  server.on("/json", handleJson);
   server.on("/addUser", handleAddUser);
   server.on("/saveUser", HTTP_POST, handleSaveUser);
   server.on("/deleteUser", handleDeleteUserPage);
@@ -923,10 +1127,13 @@ void setup() {
   server.on("/deleteCsv", handleDeleteCSV);
   server.on("/wifi", handleWifiPage);
   server.on("/saveWifi", HTTP_POST, handleSaveWifi);
+  server.on("/rtc", handleRTCPage);
+  server.on("/saveRTC", HTTP_POST, handleSaveRTC);
+  server.on("/apConfig", handleApConfigPage);
+  server.on("/saveApConfig", HTTP_POST, handleSaveApConfig);
 
   server.begin();
-
-  showMessage("READY! Scan Card", "AP IP: ", WiFi.softAPIP().toString());
+  showMessage("READY! Scan Card", "AP IP: "+ WiFi.softAPIP().toString());
 }
 
 void loop() {
