@@ -5,7 +5,9 @@
 ![Python](https://img.shields.io/badge/Backend-Python%20Flask-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-Active%20Development-success?style=for-the-badge)
 
-![Zero_board](./assets/project.jpg)
+<p align="center">
+  <img src="assets/project.jpg" width="70%" alt="Zero board image">
+</p>
 
 An enterprise-grade, highly optimized RFID attendance system built on the ESP32 microcontroller. Designed for environments with unstable or non-existent internet connections, this system operates completely offline, logging attendance data to local flash memory, and features an auto-sync engine that securely pushes data to a remote Python backend when a known network becomes available.
 
