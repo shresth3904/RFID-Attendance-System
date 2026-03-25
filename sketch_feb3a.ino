@@ -90,106 +90,234 @@ void startAP() {
 }
 
 
-void connectToWiFiIfConfigured() {
-  showMessage("UPLOADING FILES...");
-  if (!LittleFS.exists("/wifi.json")) {
-    startAP();
-    return;
-  }
-
-  File f = LittleFS.open("/wifi.json", FILE_READ);
-  if (!f) {
-    startAP();
-    return;
-  }
-
-  StaticJsonDocument<256> doc;
-  if (deserializeJson(doc, f)) {
-    f.close();
-    startAP();
-    return;
-  }
-  f.close();
-
-  const char* ssid = doc["ssid"];
-  const char* pass = doc["pass"];
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, pass);
-
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
-    delay(300);
-    Serial.print(".");
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    Serial.println("\nConnected to WiFi");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\nWiFi failed. Falling back to AP mode.");
-    startAP();
-  }
-}
-
 void handleWifiPage() {
-    const char html[] PROGMEM = R"rawliteral(
+  String options = "";
+  String savedList = "";
+  
+  if (LittleFS.exists("/wifi.json")) {
+    File f = LittleFS.open("/wifi.json", FILE_READ);
+    if (f) {
+      StaticJsonDocument<1024> doc;
+      if (!deserializeJson(doc, f)) {
+        JsonArray networks = doc.as<JsonArray>();
+        for (JsonObject net : networks) {
+          String ssid = net["ssid"].as<String>();
+          // Build dropdown options
+          options += "<option value='" + ssid + "'>" + ssid + "</option>";
+          
+          // Build management list
+          savedList += "<div class='row'><span>" + ssid + "</span>";
+          savedList += "<form action='/deleteWifi' method='POST' style='margin:0;'>";
+          savedList += "<input type='hidden' name='ssid' value='" + ssid + "'>";
+          savedList += "<button type='submit' class='del-btn'>Delete</button></form></div>";
+        }
+      }
+      f.close();
+    }
+  }
+
+  if (savedList == "") {
+    savedList = "<div class='muted' style='text-align:center;'>No networks saved yet.</div>";
+  }
+
+  String html = R"rawliteral(
   <!DOCTYPE html>
   <html>
   <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>WiFi Setup</title>
+  <title>WiFi Setup & Sync</title>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #e5e7eb; margin: 0; padding: 16px; display: flex; justify-content: center; min-height: 100vh; }
     .card { width: 100%; max-width: 400px; background: #020617; border-radius: 12px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #1f2933; }
     h2 { margin: 0 0 20px 0; color: #93c5fd; text-align: center; }
+    h3 { margin: 24px 0 12px 0; color: #94a3b8; font-size: 16px; border-bottom: 1px solid #1f2933; padding-bottom: 8px;}
     label { display: block; margin-bottom: 8px; font-size: 14px; color: #94a3b8; font-weight: 500; }
-    input { width: 100%; padding: 12px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #f8fafc; font-size: 16px; box-sizing: border-box; }
-    input:focus { outline: none; border-color: #3b82f6; }
+    input, select { width: 100%; padding: 12px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #f8fafc; font-size: 16px; box-sizing: border-box; }
+    input:focus, select:focus { outline: none; border-color: #3b82f6; }
     button { width: 100%; padding: 14px; background: #2563eb; color: white; border: none; border-radius: 8px; font-weight: 600; font-size: 16px; cursor: pointer; transition: background 0.2s; }
     button:hover { background: #1d4ed8; }
+    .del-btn { background: #7f1d1d; padding: 8px 12px; font-size: 12px; width: auto; border-radius: 6px; }
+    .del-btn:hover { background: #991b1b; }
+    .row { display: flex; justify-content: space-between; align-items: center; padding: 10px; border: 1px solid #1f2933; border-radius: 8px; margin-bottom: 8px; background: #0f172a; }
+    .divider { text-align: center; margin: 20px 0; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
     a { display: block; text-align: center; margin-top: 20px; color: #64748b; text-decoration: none; font-size: 14px; }
-    a:hover { color: #93c5fd; }
+    .muted { opacity: 0.7; font-size: 14px; }
   </style>
+  <script>
+    function toggleNewNetwork() {
+      var select = document.getElementById("saved_ssid");
+      var newForm = document.getElementById("new_network_form");
+      if(select.value === "NEW") {
+        newForm.style.display = "block";
+      } else {
+        newForm.style.display = "none";
+      }
+    }
+  </script>
   </head>
   <body>
     <div class="card">
-      <h2>Connect to WiFi</h2>
+      <h2>Sync via WiFi</h2>
       <form action="/saveWifi" method="POST">
-        <label>SSID Name</label>
-        <input name="ssid" placeholder="Enter WiFi Name" required>
+        <label>Select Saved Network</label>
+        <select name="saved_ssid" id="saved_ssid" onchange="toggleNewNetwork()">
+          <option value="" disabled selected>-- Choose Network --</option>
+          )rawliteral" + options + R"rawliteral(
+          <option value="NEW">+ Add New Network</option>
+        </select>
 
-        <label>Password</label>
-        <input name="pass" type="password" placeholder="Enter WiFi Password">
+        <div id="new_network_form" style="display:none;">
+          <div class="divider">Or enter new details</div>
+          <label>New SSID Name</label>
+          <input name="ssid" placeholder="Enter WiFi Name">
+          <label>Password</label>
+          <input name="pass" type="password" placeholder="Enter WiFi Password">
+        </div>
 
-        <button type="submit">Save & Connect</button>
+        <button type="submit">Connect & Sync Now</button>
       </form>
+      
+      <h3>Manage Saved Networks</h3>
+      )rawliteral" + savedList + R"rawliteral(
+
       <a href="/">Cancel & Back to Home</a>
     </div>
   </body>
   </html>
   )rawliteral";
-    server.send_P(200, "text/html", html);
+  server.send(200, "text/html", html);
+}
+
+void handleDeleteWifi() {
+  if (!server.hasArg("ssid")) {
+    server.send(400, "text/plain", "Missing SSID");
+    return;
+  }
+  
+  String targetSsid = server.arg("ssid");
+
+  if (LittleFS.exists("/wifi.json")) {
+    File f = LittleFS.open("/wifi.json", FILE_READ);
+    StaticJsonDocument<1024> oldDoc;
+    StaticJsonDocument<1024> newDoc;
+    JsonArray newNetworks = newDoc.to<JsonArray>();
+
+    if (f) {
+      if (!deserializeJson(oldDoc, f)) {
+        JsonArray networks = oldDoc.as<JsonArray>();
+        // Rebuild the array, skipping the one we want to delete
+        for (JsonObject net : networks) {
+          if (net["ssid"].as<String>() != targetSsid) {
+            JsonObject newNet = newNetworks.createNestedObject();
+            newNet["ssid"] = net["ssid"];
+            newNet["pass"] = net["pass"];
+          }
+        }
+      }
+      f.close();
+    }
+
+    // Write the updated array back to flash
+    File fWrite = LittleFS.open("/wifi.json", FILE_WRITE);
+    serializeJson(newDoc, fWrite);
+    fWrite.close();
+  }
+
+  // Redirect silently back to the WiFi page
+  server.sendHeader("Location", "/wifi");
+  server.send(303);
 }
 
 void handleSaveWifi() {
-  if (!server.hasArg("ssid") || !server.hasArg("pass")) {
-    server.send(400, "text/plain", "Missing credentials");
+  String targetSsid = "";
+  String targetPass = "";
+  
+  StaticJsonDocument<1024> doc;
+  JsonArray networks;
+
+  // Load existing saved networks
+  if (LittleFS.exists("/wifi.json")) {
+    File f = LittleFS.open("/wifi.json", FILE_READ);
+    if (f) {
+      deserializeJson(doc, f);
+      networks = doc.as<JsonArray>();
+      f.close();
+    }
+  } else {
+    networks = doc.to<JsonArray>();
+  }
+
+  String selected = server.arg("saved_ssid");
+
+  if (selected == "NEW" && server.hasArg("ssid") && server.hasArg("pass")) {
+    // Save new network logic
+    targetSsid = server.arg("ssid");
+    targetPass = server.arg("pass");
+    
+    // Check if it already exists to avoid duplicates
+    bool exists = false;
+    for (JsonObject net : networks) {
+      if (net["ssid"] == targetSsid) {
+        net["pass"] = targetPass; // Update password
+        exists = true;
+        break;
+      }
+    }
+    
+    if (!exists) {
+      JsonObject newNet = networks.createNestedObject();
+      newNet["ssid"] = targetSsid;
+      newNet["pass"] = targetPass;
+    }
+
+    // Save back to file
+    File f = LittleFS.open("/wifi.json", FILE_WRITE);
+    serializeJson(doc, f);
+    f.close();
+
+  } else {
+    // Retrieve password for saved network
+    targetSsid = selected;
+    for (JsonObject net : networks) {
+      if (net["ssid"] == targetSsid) {
+        targetPass = net["pass"].as<String>();
+        break;
+      }
+    }
+  }
+
+  if (targetSsid == "") {
+    server.send(400, "text/plain", "Invalid Selection");
     return;
   }
 
-  StaticJsonDocument<256> doc;
-  doc["ssid"] = server.arg("ssid");
-  doc["pass"] = server.arg("pass");
+  // Tell the browser we are starting
+  server.send(200, "text/html", "<h3>Connecting to " + targetSsid + " and Syncing...</h3><p>Check the OLED screen for progress. You can return to the home page in 10 seconds.</p><a href='/'>Go Home</a>");
 
-  File f = LittleFS.open("/wifi.json", FILE_WRITE);
-  serializeJson(doc, f);
-  f.close();
+  // Switch to dual mode temporarily
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(targetSsid.c_str(), targetPass.c_str());
 
-  server.send(200, "text/plain", "Saved. Rebooting...");
-  delay(1000);
-  ESP.restart();
+  showMessage("SYNCING...", "Connecting to:", targetSsid);
+  
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
+    delay(300);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    // Successfully connected to internet, run your sync function
+    syncAllCSVs(); 
+  } else {
+    showMessage("SYNC FAILED", "Could not connect to", targetSsid);
+    delay(3000);
+  }
+
+  // Drop the router connection and revert to pure AP mode
+  WiFi.disconnect();
+  WiFi.mode(WIFI_AP);
+  showMessage("READY! Scan Card", "AP IP: " + WiFi.softAPIP().toString());
 }
 
 
@@ -429,30 +557,76 @@ String getSafeDateForFilename() {
   return String(now.year()) + "-" + twoDigit(now.month()) + "-" + twoDigit(now.day()) + "_Attendance.csv";
 }
 
-void MarkAttendance(const String &uid, String& name, String& mID) {
-
+void processTap(const String &uid, String& name, String& mID, bool& isLogin) {
   String path = "/" + getSafeDateForFilename();
+  String tempPath = "/temp_att.csv";
   markPending(getSafeDateForFilename());
 
-  if (!LittleFS.exists(path)) {
-    File file = LittleFS.open(path, FILE_WRITE);
-    if (!file) return;
-    file.println("MEMBER_ID,NAME,DATE,TIME");
-    file.close();
+  bool fileExisted = LittleFS.exists(path);
+  isLogin = true; // Assume it's a login until we find an open session
+
+  File tempFile = LittleFS.open(tempPath, FILE_WRITE);
+  if (!tempFile) {
+    Serial.println("Failed to open temp file.");
+    return;
   }
 
-  File file = LittleFS.open(path, FILE_APPEND);
-  if (!file) return;
+  // Write header if the file is completely new today
+  if (!fileExisted) {
+    tempFile.println("MEMBER_ID,NAME,DATE,LOGIN_TIME,LOGOUT_TIME");
+  } else {
+    File file = LittleFS.open(path, FILE_READ);
+    if (file) {
+      while (file.available()) {
+        String line = file.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0) continue;
 
-  file.print(mID);
-  file.print(",");
-  file.print(name);
-  file.print(",");
-  file.print(getDate());
-  file.print(",");
-  file.println(getTime());
-  file.close();
-  
+        if (line.startsWith("MEMBER_ID")) {
+          tempFile.println(line); // Copy header
+          continue;
+        }
+
+        // Check if this line belongs to the user AND has an open session
+        if (line.startsWith(mID + ",")) {
+          int lastComma = line.lastIndexOf(',');
+          String logoutVal = line.substring(lastComma + 1);
+          
+          if (logoutVal == "PENDING") {
+            // Found an open login. This is a LOGOUT.
+            isLogin = false;
+            // Reconstruct the line, replacing "PENDING" with the current time
+            String updatedLine = line.substring(0, lastComma + 1) + getTime();
+            tempFile.println(updatedLine);
+            continue; // Skip writing the original "PENDING" line
+          }
+        }
+        // If not our target row, or it's a closed session, copy it exactly as is
+        tempFile.println(line);
+      }
+      file.close();
+    }
+  }
+
+  // If we scanned the whole file and didn't find a PENDING logout, it's a new LOGIN
+  if (isLogin) {
+    tempFile.print(mID);
+    tempFile.print(",");
+    tempFile.print(name);
+    tempFile.print(",");
+    tempFile.print(getDate());
+    tempFile.print(",");
+    tempFile.print(getTime());
+    tempFile.println(",PENDING"); // Leave logout empty/pending
+  }
+
+  tempFile.close();
+
+  // Swap the files
+  if (fileExisted) {
+    LittleFS.remove(path);
+  }
+  LittleFS.rename(tempPath, path);
 }
 
 void deleteUser(const String& uid) {
@@ -1056,20 +1230,36 @@ bool findUsers(const String& targetUid, String& outName, String& outMID){
 void verifyUID(String uid) {
   String name, mID;
   if (findUsers(uid, name, mID)) {
-    showMessage("Welcome", name, mID);
+    bool isLogin = true;
+    
+    // Process the tap and determine the state directly from the file rewrite
+    processTap(uid, name, mID, isLogin);
+    
+    // Update the OLED based on the state returned
+    if (isLogin) {
+      showMessage("--- LOGGED IN ---", name, getTime());
+    } else {
+      showMessage("--- LOGGED OUT ---", name, getTime());
+    }
+    
     digitalWrite(GREEN_LED_PIN, HIGH);
     tone(BUZZER_PIN, 2000, 120);
-    MarkAttendance(uid, name, mID);
-    delay(300);
+    delay(1500); // Give user time to read the screen
     digitalWrite(GREEN_LED_PIN, LOW);
+    
+    // Reset screen
+    showMessage("READY! Scan Card", "AP IP: " + WiFi.softAPIP().toString());
+
   } else {
     showMessage("Access Denied", uid);
     digitalWrite(RED_LED_PIN, HIGH);
     tone(BUZZER_PIN, 400, 200);
-    delay(300);
+    delay(1500);
     digitalWrite(RED_LED_PIN, LOW);
+    showMessage("READY! Scan Card", "AP IP: " + WiFi.softAPIP().toString());
   }
 }
+
 
 void setup() {
   Serial.begin(115200);
@@ -1111,8 +1301,7 @@ void setup() {
     f.close();
   }
 
-  connectToWiFiIfConfigured();
-  //startAP();
+  startAP();
 
   Serial.print("AP IP: ");
   Serial.println(WiFi.softAPIP());
@@ -1131,6 +1320,7 @@ void setup() {
   server.on("/saveRTC", HTTP_POST, handleSaveRTC);
   server.on("/apConfig", handleApConfigPage);
   server.on("/saveApConfig", HTTP_POST, handleSaveApConfig);
+  server.on("/deleteWifi", HTTP_POST, handleDeleteWifi);
 
   server.begin();
   showMessage("READY! Scan Card", "AP IP: "+ WiFi.softAPIP().toString());
@@ -1139,13 +1329,6 @@ void setup() {
 void loop() {
   now = rtc.now();
   server.handleClient();
-
-  if (WiFi.status() == WL_CONNECTED && millis() - lastSync > 10000) {
-    Serial.println("Called for saving CSV");
-    syncAllCSVs();   
-    lastSync = millis();
-  }
-
   if (!mfrc522.PICC_IsNewCardPresent()) return;
   if (!mfrc522.PICC_ReadCardSerial()) return;
 
